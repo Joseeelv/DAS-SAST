@@ -34,22 +34,57 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install semgrep
 
-      - name: Ejecutar Semgrep y aplicar soluciones
+      - name: Escanear y crear PRs individuales
         run: |
-          semgrep --config=auto --autofix
+          # Ejecutar Semgrep y guardar resultados en JSON
+          semgrep --config=auto --json --output=semgrep-results.json
+          
+          # Verificar si hay vulnerabilidades
+          if [ ! -s semgrep-results.json ]; then
+            echo "No se encontraron vulnerabilidades"
+            exit 0
+          fi
+          
+          # Obtener lista de archivos únicos con vulnerabilidades
+          files=$(jq -r '.results[].path' semgrep-results.json | sort -u)
+          
+          for file in $files; do
+            echo "Procesando archivo: $file"
+            
+            # Crear rama única para este archivo
+            branch_name="semgrep-autofix-$(echo "$file" | tr '/' '-' | tr '.' '-')-$(date +%s)"
+            git checkout -b "$branch_name"
+            
+            # Aplicar autofix solo para este archivo
+            semgrep --config=auto --autofix "$file" || true
+            
+            # Verificar si hubo cambios
+            if git diff --quiet "$file"; then
+              echo "No hay cambios en $file, saltando..."
+              git checkout main
+              git branch -D "$branch_name"
+              continue
+            fi
+            
+            # Commit y push
+            git add "$file"
+            git commit -m "security: fix vulnerabilities in $file"
+            git push origin "$branch_name"
+            
+            # Crear PR usando GitHub CLI
+            gh pr create \
+              --title "Solución automática en $file" \
+              --body "Este PR soluciona vulnerabilidades detectadas por Semgrep en el archivo \`$file\`. Revisa los cambios antes de mergear." \
+              --base main \
+              --head "$branch_name"
+            
+            # Volver a main para el siguiente archivo
+            git checkout main
+            git branch -D "$branch_name"
+          done
+        env:
+          GH_TOKEN: ${{ secrets.PR_TOKEN }}
 
-      - name: Mostrar cambios pendientes
+      - name: Mostrar resumen
         run: |
-          git status --porcelain || true
-
-      - name: Crear Pull Request si hay cambios
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.PR_TOKEN }}
-          commit-message: "security: solucionar vulnerabilidades detectadas por Semgrep"
-          title: "⚠️ Solución automática de vulnerabilidades (Semgrep)"
-          body: |
-            Este es un PR automático generado por el pipeline de seguridad de Semgrep.
-            Por favor, revisa los cambios sugeridos en el código antes de mergear.
-          branch: semgrep-autofix-patches
-          delete-branch: true
+          echo "Proceso completado. Revisa los PRs creados."
