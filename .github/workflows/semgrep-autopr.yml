@@ -1,22 +1,46 @@
 name: Semgrep Autofix PR
+
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch: # Permite ejecutarlo manualmente
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: semgrep-autofix-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   semgrep-autofix:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Instalar Semgrep
-        run: pip install semgrep
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install semgrep
 
-      - name: Ejecutar Semgrep y aplicar soluciones en el código
-        # La bandera --autofix modifica físicamente los archivos vulnerables detectados
-        run: semgrep --config=auto --autofix 
+      - name: Ejecutar Semgrep y aplicar soluciones
+        run: |
+          semgrep --config=auto --autofix
+
+      - name: Mostrar cambios pendientes
+        run: |
+          git status --porcelain || true
 
       - name: Crear Pull Request si hay cambios
         uses: peter-evans/create-pull-request@v6
@@ -26,6 +50,6 @@ jobs:
           title: "⚠️ Solución automática de vulnerabilidades (Semgrep)"
           body: |
             Este es un PR automático generado por el pipeline de seguridad de Semgrep.
-            Por favor, revisa los cambios sugeridos en el código antes de mergear a main.
+            Por favor, revisa los cambios sugeridos en el código antes de mergear.
           branch: semgrep-autofix-patches
           delete-branch: true
