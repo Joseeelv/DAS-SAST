@@ -1,0 +1,36 @@
+rules:
+  - id: uca-python-eval
+    languages: [python]
+    message: "Uso de eval. Comprueba si el argumento puede proceder del usuario."
+    severity: WARNING
+    pattern: eval(...)
+  - id: uca-js-eval
+    languages: [javascript]
+    message: "Uso de eval. Comprueba si el argumento puede proceder del usuario."
+    severity: WARNING
+    pattern: eval(...)
+  - id: uca-python-shell
+    languages: [python]
+    message: "Proceso con shell=True. Revisa el origen del comando."
+    severity: WARNING
+    pattern: subprocess.run(..., shell=True, ...)
+  - id: uca-python-tls
+    languages: [python]
+    message: "Verificación del certificado desactivada."
+    severity: WARNING
+    pattern: requests.get(..., verify=False, ...)
+  - id: uca-js-exec
+    languages: [javascript]
+    message: "exec interpreta un comando mediante shell; revisa su construcción."
+    severity: WARNING
+    pattern: $CP.exec(...)
+  - id: uca-c-strcpy
+    languages: [c]
+    message: "strcpy no recibe la capacidad del destino; comprueba los tamaños."
+    severity: WARNING
+    pattern: strcpy(...)
+  - id: uca-c-system
+    languages: [c]
+    message: "system interpreta una orden; revisa si el requisito necesita un shell."
+    severity: WARNING
+    pattern: system(...)
