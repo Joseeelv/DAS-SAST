@@ -3,7 +3,7 @@ name: Semgrep Autofix PR
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 6 * * *"   # una vez al día; cada 5 min es excesivo
 
 permissions:
   contents: write
@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: semgrep-autofix-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false   # evita cortar una ejecución a mitad de crear PRs
 
 jobs:
   semgrep-autofix:
@@ -23,6 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.PR_TOKEN }}
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -30,121 +31,107 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependencias
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install semgrep
-          sudo apt-get update
-          sudo apt-get install -y jq
+        run: python -m pip install --upgrade pip semgrep
 
-      - name: Escanear y crear PRs individuales
-        run: |
-          # Obtener rama por defecto
-          DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | cut -d' ' -f5)
-          echo "Rama por defecto: $DEFAULT_BRANCH"
-          
-          # Ejecutar Semgrep y guardar resultados
-          echo "Ejecutando escaneo de Semgrep..."
-          semgrep --config=auto --json --output=semgrep-results.json || {
-            echo "Error ejecutando Semgrep"
-            exit 1
-          }
-          
-          # Verificar si hay vulnerabilidades
-          if [ ! -s semgrep-results.json ]; then
-            echo "No se encontraron vulnerabilidades"
-            exit 0
-          fi
-          
-          # Obtener lista de archivos únicos
-          files=$(jq -r '.results[].path' semgrep-results.json 2>/dev/null | sort -u)
-          
-          if [ -z "$files" ]; then
-            echo "No se pudieron extraer archivos del JSON"
-            exit 1
-          fi
-          
-          echo "Archivos con vulnerabilidades:"
-          echo "$files"
-          
-          for file in $files; do
-            echo "=========================================="
-            echo "Procesando archivo: $file"
-            echo "=========================================="
-            
-            # Verificar que el archivo existe
-            if [ ! -f "$file" ]; then
-              echo "El archivo $file no existe, saltando..."
-              continue
-            fi
-            
-            # Crear rama única
-            timestamp=$(date +%s)
-            branch_name="semgrep-autofix-$(echo "$file" | tr '/' '-' | tr '.' '-')-$timestamp"
-            
-            echo "Creando rama: $branch_name"
-            git checkout -b "$branch_name" || {
-              echo "Error creando rama $branch_name"
-              continue
-            }
-            
-            # Aplicar autofix
-            echo "Aplicando autofix en $file..."
-            semgrep --config=auto --autofix "$file" || {
-              echo "Error aplicando autofix en $file"
-              git checkout "$DEFAULT_BRANCH"
-              git branch -D "$branch_name" 2>/dev/null || true
-              continue
-            }
-            
-            # Verificar si hubo cambios
-            if git diff --quiet "$file"; then
-              echo "No hay cambios en $file, saltando..."
-              git checkout "$DEFAULT_BRANCH"
-              git branch -D "$branch_name" 2>/dev/null || true
-              continue
-            fi
-            
-            # Commit y push
-            echo "Haciendo commit de cambios..."
-            git add "$file"
-            git commit -m "security: fix vulnerabilities in $file" || {
-              echo "Error haciendo commit"
-              git checkout "$DEFAULT_BRANCH"
-              git branch -D "$branch_name" 2>/dev/null || true
-              continue
-            }
-            
-            echo "Haciendo push de rama..."
-            git push origin "$branch_name" || {
-              echo "Error haciendo push"
-              git checkout "$DEFAULT_BRANCH"
-              git branch -D "$branch_name" 2>/dev/null || true
-              continue
-            }
-            
-            # Crear PR
-            echo "Creando Pull Request..."
-            gh pr create \
-              --title "⚠️ Solución automática en $file" \
-              --body "Este PR soluciona vulnerabilidades detectadas por Semgrep en el archivo \`$file\`. Revisa los cambios antes de mergear." \
-              --base "$DEFAULT_BRANCH" \
-              --head "$branch_name" || {
-                echo "Error creando PR para $file"
-                git checkout "$DEFAULT_BRANCH"
-                continue
-              }
-            
-            echo "PR creado exitosamente para $file"
-            
-            # Volver a rama por defecto
-            git checkout "$DEFAULT_BRANCH"
-            git branch -D "$branch_name" 2>/dev/null || true
-          done
-          
-          echo "Proceso completado"
+      - name: Escanear y crear una PR por hallazgo
         env:
           GH_TOKEN: ${{ secrets.PR_TOKEN }}
-
-      - name: Mostrar resumen
+          MAX_PRS: "10"   # límite de PRs por ejecución
         run: |
-          echo "Proceso completado. Revisa los PRs creados en la pestaña Pull Requests."
+          set -u
+          git config user.name  "semgrep-autofix[bot]"
+          git config user.email "semgrep-autofix@users.noreply.github.com"
+
+          DEFAULT_BRANCH=$(git remote show origin | sed -n 's/.*HEAD branch: //p')
+          BASE_SHA=$(git rev-parse HEAD)
+          echo "Rama por defecto: $DEFAULT_BRANCH ($BASE_SHA)"
+
+          # 1. Escaneo
+          semgrep --config=auto --json --output=semgrep-results.json || true
+
+          # 2. Solo hallazgos con fix disponible, uno por línea (JSONL)
+          jq -c '.results[]
+                 | select(.extra.fix != null)
+                 | {check_id, path, start: .start, end: .end,
+                    fix: .extra.fix, lines: .extra.lines,
+                    message: .extra.message}' \
+            semgrep-results.json > findings.jsonl
+
+          TOTAL=$(wc -l < findings.jsonl)
+          echo "Hallazgos con autofix: $TOTAL"
+          [ "$TOTAL" -eq 0 ] && exit 0
+
+          # Script que aplica UN fix usando los offsets
+          cat > apply_fix.py <<'PY'
+          import json, sys
+          f = json.load(sys.stdin)
+          with open(f["path"], "rb") as fh:
+              data = fh.read()
+          s, e = f["start"]["offset"], f["end"]["offset"]
+          data = data[:s] + f["fix"].encode() + data[e:]
+          with open(f["path"], "wb") as fh:
+              fh.write(data)
+          PY
+
+          created=0
+
+          # 3. Un bucle = un hallazgo = una PR (fd 3 para que git/gh no consuman stdin)
+          while IFS= read -r finding <&3; do
+            [ "$created" -ge "$MAX_PRS" ] && { echo "Límite de $MAX_PRS PRs alcanzado"; break; }
+
+            check_id=$(jq -r '.check_id' <<<"$finding")
+            file=$(jq -r '.path'     <<<"$finding")
+            line=$(jq -r '.start.line' <<<"$finding")
+
+            # Clave estable: regla + archivo + contenido de la línea (no cambia si se mueve de línea)
+            key=$(jq -r '[.check_id, .path, .lines] | join("|")' <<<"$finding" | sha1sum | cut -c1-12)
+            branch="semgrep-fix/$key"
+
+            echo "=== $check_id en $file:$line ($branch) ==="
+
+            # Evitar duplicados: rama existente o PR (abierta/cerrada/mergeada)
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              echo "La rama ya existe, saltando"; continue
+            fi
+            if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[0].number')" ]; then
+              echo "Ya existe una PR para este hallazgo, saltando"; continue
+            fi
+
+            # Siempre partir del mismo commit que se escaneó (los offsets son válidos ahí)
+            git checkout -q -f -B "$branch" "$BASE_SHA"
+
+            python apply_fix.py <<<"$finding"
+
+            if git diff --quiet; then
+              echo "El fix no produjo cambios, saltando"
+              git checkout -q -f "$BASE_SHA"; git branch -q -D "$branch"; continue
+            fi
+
+            git add -A
+            git commit -q -m "security: fix $check_id in $file:$line"
+
+            if ! git push -q origin "$branch"; then
+              echo "Error en push"
+              git checkout -q -f "$BASE_SHA"; git branch -q -D "$branch"; continue
+            fi
+
+            message=$(jq -r '.message' <<<"$finding")
+            gh pr create \
+              --base "$DEFAULT_BRANCH" \
+              --head "$branch" \
+              --title "fix(semgrep): ${check_id##*.} en $file:$line" \
+              --body "Semgrep detectó un problema y esta PR aplica su autofix.
+
+          **Regla:** \`$check_id\`
+          **Archivo:** \`$file\` (línea $line)
+
+          $message
+
+          Revisa el cambio antes de mergear." \
+              && created=$((created+1))
+
+            git checkout -q -f "$BASE_SHA"
+            git branch -q -D "$branch" || true
+          done 3< findings.jsonl
+
+          echo "PRs creadas en esta ejecución: $created"
