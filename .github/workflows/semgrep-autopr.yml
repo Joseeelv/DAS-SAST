@@ -45,7 +45,7 @@ jobs:
       - name: Crear Pull Request si hay cambios
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PR_TOKEN }}
           commit-message: "security: solucionar vulnerabilidades detectadas por Semgrep"
           title: "⚠️ Solución automática de vulnerabilidades (Semgrep)"
           body: |
