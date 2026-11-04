@@ -6,6 +6,6 @@ import requests
 
 
 def descargar(url, ca_autorizada):
-    respuesta = requests.get(url, verify=False, timeout=3)
+    respuesta = requests.get(url, verify=True, timeout=3)
     respuesta.raise_for_status()
     return respuesta.text
