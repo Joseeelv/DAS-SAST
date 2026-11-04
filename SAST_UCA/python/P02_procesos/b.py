@@ -9,6 +9,6 @@ import sys
 def diagnosticar(nombre, directorio):
     comando = f'"{sys.executable}" -c "import sys; print(sys.argv[1])" {nombre}'
     return subprocess.run(
-        comando, shell=True, cwd=directorio, capture_output=True,
+        comando, shell=False, cwd=directorio, capture_output=True,
         text=True, timeout=5, check=True,
     ).stdout.strip()
