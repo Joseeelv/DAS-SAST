@@ -36,6 +36,8 @@ jobs:
 
       - name: Escanear y crear PRs individuales
         run: |
+          base_branch="${{ github.event.repository.default_branch }}"
+
           # Ejecutar Semgrep y guardar resultados en JSON
           semgrep --config=auto --json --output=semgrep-results.json
           
@@ -61,7 +63,7 @@ jobs:
             # Verificar si hubo cambios
             if git diff --quiet "$file"; then
               echo "No hay cambios en $file, saltando..."
-              git checkout main
+              git checkout "$base_branch"
               git branch -D "$branch_name"
               continue
             fi
@@ -75,11 +77,11 @@ jobs:
             gh pr create \
               --title "Solución automática en $file" \
               --body "Este PR soluciona vulnerabilidades detectadas por Semgrep en el archivo \`$file\`. Revisa los cambios antes de mergear." \
-              --base main \
+              --base "$base_branch" \
               --head "$branch_name"
             
-            # Volver a main para el siguiente archivo
-            git checkout main
+            # Volver a la rama base para el siguiente archivo
+            git checkout "$base_branch"
             git branch -D "$branch_name"
           done
         env:
