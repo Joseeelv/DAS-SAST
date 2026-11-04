@@ -29,15 +29,25 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Instalar Semgrep
+      - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           python -m pip install semgrep
+          sudo apt-get update
+          sudo apt-get install -y jq
 
       - name: Escanear y crear PRs individuales
         run: |
-          # Ejecutar Semgrep y guardar resultados en JSON
-          semgrep --config=auto --json --output=semgrep-results.json
+          # Obtener rama por defecto
+          DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | cut -d' ' -f5)
+          echo "Rama por defecto: $DEFAULT_BRANCH"
+          
+          # Ejecutar Semgrep y guardar resultados
+          echo "Ejecutando escaneo de Semgrep..."
+          semgrep --config=auto --json --output=semgrep-results.json || {
+            echo "Error ejecutando Semgrep"
+            exit 1
+          }
           
           # Verificar si hay vulnerabilidades
           if [ ! -s semgrep-results.json ]; then
@@ -45,46 +55,96 @@ jobs:
             exit 0
           fi
           
-          # Obtener lista de archivos únicos con vulnerabilidades
-          files=$(jq -r '.results[].path' semgrep-results.json | sort -u)
+          # Obtener lista de archivos únicos
+          files=$(jq -r '.results[].path' semgrep-results.json 2>/dev/null | sort -u)
+          
+          if [ -z "$files" ]; then
+            echo "No se pudieron extraer archivos del JSON"
+            exit 1
+          fi
+          
+          echo "Archivos con vulnerabilidades:"
+          echo "$files"
           
           for file in $files; do
+            echo "=========================================="
             echo "Procesando archivo: $file"
+            echo "=========================================="
             
-            # Crear rama única para este archivo
-            branch_name="semgrep-autofix-$(echo "$file" | tr '/' '-' | tr '.' '-')-$(date +%s)"
-            git checkout -b "$branch_name"
+            # Verificar que el archivo existe
+            if [ ! -f "$file" ]; then
+              echo "El archivo $file no existe, saltando..."
+              continue
+            fi
             
-            # Aplicar autofix solo para este archivo
-            semgrep --config=auto --autofix "$file" || true
+            # Crear rama única
+            timestamp=$(date +%s)
+            branch_name="semgrep-autofix-$(echo "$file" | tr '/' '-' | tr '.' '-')-$timestamp"
+            
+            echo "Creando rama: $branch_name"
+            git checkout -b "$branch_name" || {
+              echo "Error creando rama $branch_name"
+              continue
+            }
+            
+            # Aplicar autofix
+            echo "Aplicando autofix en $file..."
+            semgrep --config=auto --autofix "$file" || {
+              echo "Error aplicando autofix en $file"
+              git checkout "$DEFAULT_BRANCH"
+              git branch -D "$branch_name" 2>/dev/null || true
+              continue
+            }
             
             # Verificar si hubo cambios
             if git diff --quiet "$file"; then
               echo "No hay cambios en $file, saltando..."
-              git checkout main
-              git branch -D "$branch_name"
+              git checkout "$DEFAULT_BRANCH"
+              git branch -D "$branch_name" 2>/dev/null || true
               continue
             fi
             
             # Commit y push
+            echo "Haciendo commit de cambios..."
             git add "$file"
-            git commit -m "security: fix vulnerabilities in $file"
-            git push origin "$branch_name"
+            git commit -m "security: fix vulnerabilities in $file" || {
+              echo "Error haciendo commit"
+              git checkout "$DEFAULT_BRANCH"
+              git branch -D "$branch_name" 2>/dev/null || true
+              continue
+            }
             
-            # Crear PR usando GitHub CLI
+            echo "Haciendo push de rama..."
+            git push origin "$branch_name" || {
+              echo "Error haciendo push"
+              git checkout "$DEFAULT_BRANCH"
+              git branch -D "$branch_name" 2>/dev/null || true
+              continue
+            }
+            
+            # Crear PR
+            echo "Creando Pull Request..."
             gh pr create \
-              --title "Solución automática en $file" \
+              --title "⚠️ Solución automática en $file" \
               --body "Este PR soluciona vulnerabilidades detectadas por Semgrep en el archivo \`$file\`. Revisa los cambios antes de mergear." \
-              --base main \
-              --head "$branch_name"
+              --base "$DEFAULT_BRANCH" \
+              --head "$branch_name" || {
+                echo "Error creando PR para $file"
+                git checkout "$DEFAULT_BRANCH"
+                continue
+              }
             
-            # Volver a main para el siguiente archivo
-            git checkout main
-            git branch -D "$branch_name"
+            echo "PR creado exitosamente para $file"
+            
+            # Volver a rama por defecto
+            git checkout "$DEFAULT_BRANCH"
+            git branch -D "$branch_name" 2>/dev/null || true
           done
+          
+          echo "Proceso completado"
         env:
           GH_TOKEN: ${{ secrets.PR_TOKEN }}
 
       - name: Mostrar resumen
         run: |
-          echo "Proceso completado. Revisa los PRs creados."
+          echo "Proceso completado. Revisa los PRs creados en la pestaña Pull Requests."
